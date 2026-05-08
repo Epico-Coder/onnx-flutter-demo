@@ -1,3 +1,5 @@
+import 'ctc_logits.dart';
+
 class CtcDecoder {
   static List<int> greedyFromLogits(
     List<double> logits, {
@@ -5,42 +7,16 @@ class CtcDecoder {
     required int blankId,
     required int eosId,
   }) {
-    late final int time;
-    late final int vocab;
-    late final int frameStride;
-
-    if (shape.length == 3) {
-      if (shape[0] == 1) {
-        time = shape[1];
-        frameStride = shape[2];
-      } else if (shape[1] == 1) {
-        time = shape[0];
-        frameStride = shape[1] * shape[2];
-      } else {
-        time = shape[1];
-        frameStride = shape[2];
-      }
-
-      vocab = shape[2];
-    } else if (shape.length == 2) {
-      time = shape[0];
-      vocab = shape[1];
-      frameStride = vocab;
-    } else {
-      throw ArgumentError('Unsupported CTC logits shape: $shape');
-    }
-
+    final layout = CtcLogitsLayout.fromShape(shape);
     final ids = <int>[];
-
     int? previous;
 
-    for (int t = 0; t < time; t++) {
+    for (int t = 0; t < layout.time; t++) {
       int bestId = 0;
       double bestValue = double.negativeInfinity;
 
-      for (int v = 0; v < vocab; v++) {
-        final value = logits[t * frameStride + v];
-
+      for (int v = 0; v < layout.vocab; v++) {
+        final value = logits[layout.index(t, v)];
         if (value > bestValue) {
           bestValue = value;
           bestId = v;
@@ -54,7 +30,6 @@ class CtcDecoder {
       if (!isBlank && !isRepeat && !isEos) {
         ids.add(bestId);
       }
-
       previous = bestId;
     }
 
@@ -66,13 +41,10 @@ class CtcDecoder {
 
     for (final id in ids) {
       if (id < 0 || id >= tokens.length) continue;
-
       final token = tokens[id];
-
       if (token.startsWith('<') && token.endsWith('>')) {
         continue;
       }
-
       pieces.add(token);
     }
 
