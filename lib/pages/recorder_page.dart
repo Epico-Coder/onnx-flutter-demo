@@ -18,6 +18,7 @@ class _RecorderPageState extends State<RecorderPage> {
   bool _isRecording = false;
   bool _isTranscribing = false;
   bool _isLoadingMicrophones = false;
+  bool _hasTranscribed = false;
 
   List<InputDevice> _microphones = [];
   InputDevice? _selectedMicrophone;
@@ -87,6 +88,7 @@ class _RecorderPageState extends State<RecorderPage> {
           _isRecording = true;
           _recordedFilePath = path;
           _transcript = '';
+          _hasTranscribed = false;
           _error = null;
         });
       }
@@ -105,6 +107,7 @@ class _RecorderPageState extends State<RecorderPage> {
     setState(() {
       _isTranscribing = true;
       _transcript = '';
+      _hasTranscribed = false;
       _error = null;
     });
 
@@ -116,6 +119,7 @@ class _RecorderPageState extends State<RecorderPage> {
 
       setState(() {
         _transcript = text;
+        _hasTranscribed = true;
       });
     } catch (e) {
       setState(() {
@@ -242,13 +246,18 @@ class _RecorderPageState extends State<RecorderPage> {
 
               const SizedBox(height: 24),
 
-              if (_transcript.isNotEmpty) ...[
+              if (_hasTranscribed) ...[
                 const Text(
                   'Transcript:',
                   style: TextStyle(fontWeight: FontWeight.bold),
                 ),
                 const SizedBox(height: 8),
-                SelectableText(_transcript),
+                SelectableText(
+                  _transcript.isEmpty
+                      ? '(No visible transcript returned. The decoded tokens may have been blank or filtered special tokens.)'
+                      : _transcript,
+                  textAlign: TextAlign.center,
+                ),
               ],
 
               if (_error != null) ...[

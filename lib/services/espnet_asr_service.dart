@@ -172,7 +172,6 @@ class EspnetAsrService {
           blankId: 0,
           eosId: 4999,
           beamSize: 20,
-          suppressedTokenIds: const {1, 2, 3, 4},
         );
       case DecodingMode.jointCtcTransformerBeam:
         return JointCtcTransformerBeamSearch(

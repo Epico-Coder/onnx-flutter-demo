@@ -73,10 +73,6 @@ class CtcDecoder {
         continue;
       }
 
-      if (token.startsWith('[') && token.endsWith(']')) {
-        continue;
-      }
-
       pieces.add(token);
     }
 
