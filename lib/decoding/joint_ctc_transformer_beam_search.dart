@@ -1,13 +1,11 @@
 import 'dart:math';
 import 'dart:typed_data';
 
-import 'package:flutter_onnxruntime/flutter_onnxruntime.dart';
+import 'ctc_logits.dart';
+import 'transformer_decoder_runner.dart';
 
 class JointCtcTransformerBeamSearch {
-  static const double _logZero = double.negativeInfinity;
-
-  final dynamic decoderSession;
-  final dynamic encoderOut;
+  final TransformerDecoderRunner decoder;
   final List<double> ctcLogits;
   final List<int> ctcShape;
   final int blankId;
@@ -17,16 +15,12 @@ class JointCtcTransformerBeamSearch {
   final int tokenPruneSize;
   final double ctcWeight;
   final double decoderWeight;
-  final int decoderLayers;
-  final int decoderOutputSize;
 
   late final _CtcLogProbs _ctcLogProbs = _CtcLogProbs(ctcLogits, ctcShape);
   final Map<String, double> _ctcPrefixScoreCache = {};
-  List<OrtValue>? _zeroCaches;
 
   JointCtcTransformerBeamSearch({
-    required this.decoderSession,
-    required this.encoderOut,
+    required this.decoder,
     required this.ctcLogits,
     required this.ctcShape,
     required this.blankId,
@@ -36,12 +30,10 @@ class JointCtcTransformerBeamSearch {
     this.tokenPruneSize = 40,
     this.ctcWeight = 0.3,
     this.decoderWeight = 0.7,
-    this.decoderLayers = 6,
-    this.decoderOutputSize = 256,
   });
 
   Future<List<int>> decode() async {
-    await _ensureZeroCaches();
+    final initialCaches = await decoder.initialCaches();
 
     var active = <_JointHypothesis>[
       _JointHypothesis(
@@ -49,28 +41,57 @@ class JointCtcTransformerBeamSearch {
         tokens: const [],
         decoderScore: 0.0,
         ctcScore: _ctcPrefixScore(const []),
+        caches: initialCaches,
       ),
     ];
     final ended = <_JointHypothesis>[];
     final maxOutputLength = max(1, _ctcLogProbs.time);
 
     for (int step = 0; step < maxOutputLength; step++) {
+      final isFinalStep = step == maxOutputLength - 1;
       final candidates = <_JointHypothesis>[];
 
       for (final hyp in active) {
-        final logProbs = await _runDecoderStep(hyp.yseq.last);
+        final result = await decoder.step(
+          prefix: hyp.yseq,
+          caches: hyp.caches,
+        );
+        final logProbs = result.logProbs;
+        final nextCaches = result.caches;
+
+        if (isFinalStep) {
+          // Force-close every still-active hypothesis at maxlen so the search
+          // always has ended candidates to choose from, matching espnet's
+          // `post_process` final-step behaviour.
+          candidates.add(
+            _JointHypothesis(
+              yseq: [...hyp.yseq, eosId],
+              tokens: hyp.tokens,
+              decoderScore: hyp.decoderScore + logProbs[eosId],
+              ctcScore: hyp.ctcScore,
+              caches: nextCaches,
+              ended: true,
+            ),
+          );
+          continue;
+        }
+
         final topIds = _topTokenIds(logProbs, tokenPruneSize, includeId: eosId);
 
         for (final tokenId in topIds) {
-          if (tokenId == blankId || tokenId == sosId) continue;
+          if (tokenId == blankId) continue;
+          if (tokenId == sosId && sosId != eosId) continue;
 
           final nextYseq = [...hyp.yseq, tokenId];
 
           if (tokenId == eosId) {
             candidates.add(
-              hyp.copyWith(
+              _JointHypothesis(
                 yseq: nextYseq,
+                tokens: hyp.tokens,
                 decoderScore: hyp.decoderScore + logProbs[tokenId],
+                ctcScore: hyp.ctcScore,
+                caches: nextCaches,
                 ended: true,
               ),
             );
@@ -84,6 +105,7 @@ class JointCtcTransformerBeamSearch {
               tokens: nextTokens,
               decoderScore: hyp.decoderScore + logProbs[tokenId],
               ctcScore: _ctcPrefixScore(nextTokens),
+              caches: nextCaches,
             ),
           );
         }
@@ -95,12 +117,11 @@ class JointCtcTransformerBeamSearch {
 
       if (active.isEmpty) break;
 
-      ended.sort((a, b) => _score(b).compareTo(_score(a)));
-
-      if (ended.length >= beamSize &&
-          _score(ended.first) >= _score(active.first)) {
-        break;
-      }
+      // Espnet-style end detection: stop when the best ended hyp at the last
+      // three lengths is at least D_end (10 nats) worse than the global best
+      // ended hyp — i.e. ended-hyp quality has plateaued and longer searches
+      // won't improve the result.
+      if (_endDetect(ended, step)) break;
     }
 
     final all = [...ended, ...active]
@@ -110,70 +131,47 @@ class JointCtcTransformerBeamSearch {
   }
 
   double _score(_JointHypothesis hyp) {
-    if (hyp.ctcScore == _logZero) {
+    if (hyp.ctcScore == LogMath.logZero) {
       return decoderWeight * hyp.decoderScore;
     }
 
     return decoderWeight * hyp.decoderScore + ctcWeight * hyp.ctcScore;
   }
 
-  Future<void> _ensureZeroCaches() async {
-    if (_zeroCaches != null) return;
+  /// Espnet-equivalent `end_detect`: return true when ended-hyp scores have
+  /// stagnated across the last `M` step lengths, i.e. growing the beam any
+  /// further is very unlikely to find a better-scoring complete hypothesis.
+  bool _endDetect(List<_JointHypothesis> endedHyps, int step,
+      {int m = 3, double dEnd = -10.0}) {
+    if (endedHyps.isEmpty) return false;
 
-    final caches = <OrtValue>[];
-    final zeros = Float32List(decoderOutputSize);
-
-    for (int i = 0; i < decoderLayers; i++) {
-      caches.add(
-        await OrtValue.fromList(zeros, [1, 1, decoderOutputSize]),
-      );
+    double bestScore = double.negativeInfinity;
+    for (final h in endedHyps) {
+      final s = _score(h);
+      if (s > bestScore) bestScore = s;
     }
 
-    _zeroCaches = caches;
-  }
+    int count = 0;
+    for (int offset = 0; offset < m; offset++) {
+      final yseqLength = step + 1 - offset;
+      if (yseqLength <= 0) break;
 
-  Future<List<double>> _runDecoderStep(int lastToken) async {
-    final inputs = <String, OrtValue>{};
-    final inputNames = decoderSession.inputNames.cast<String>();
+      double bestAtLen = double.negativeInfinity;
+      for (final h in endedHyps) {
+        if (h.yseq.length != yseqLength) continue;
+        final s = _score(h);
+        if (s > bestAtLen) bestAtLen = s;
+      }
+      if (bestAtLen == double.negativeInfinity) continue;
 
-    inputs[inputNames[0]] = await OrtValue.fromList(
-      Int64List.fromList([lastToken]),
-      [1, 1],
-    );
-    inputs[inputNames[1]] = encoderOut;
-
-    for (int i = 0; i < decoderLayers; i++) {
-      inputs[inputNames[i + 2]] = _zeroCaches![i];
+      if (bestAtLen - bestScore < dEnd) count++;
     }
 
-    final outputs = await decoderSession.run(inputs);
-    final outputNames = decoderSession.outputNames.cast<String>();
-    final logSoftmax = outputs[outputNames[0]];
-    final rawLogProbs = (await logSoftmax.asFlattenedList()).cast<double>();
-
-    return _normalizeLogProbs(rawLogProbs);
-  }
-
-  List<double> _normalizeLogProbs(List<double> values) {
-    var maxValue = double.negativeInfinity;
-
-    for (final value in values) {
-      if (value > maxValue) maxValue = value;
-    }
-
-    var sumExp = 0.0;
-
-    for (final value in values) {
-      sumExp += exp(value - maxValue);
-    }
-
-    final logSumExp = maxValue + log(sumExp);
-
-    return values.map((value) => value - logSumExp).toList();
+    return count == m;
   }
 
   List<int> _topTokenIds(
-    List<double> logProbs,
+    Float64List logProbs,
     int count, {
     required int includeId,
   }) {
@@ -239,7 +237,7 @@ class JointCtcTransformerBeamSearch {
 
     labels.add(blankId);
 
-    var previous = List<double>.filled(labels.length, _logZero);
+    var previous = List<double>.filled(labels.length, LogMath.logZero);
     previous[0] = _ctcLogProbs.at(0, blankId);
 
     if (labels.length > 1) {
@@ -247,17 +245,17 @@ class JointCtcTransformerBeamSearch {
     }
 
     for (int t = 1; t < _ctcLogProbs.time; t++) {
-      final current = List<double>.filled(labels.length, _logZero);
+      final current = List<double>.filled(labels.length, LogMath.logZero);
 
       for (int s = 0; s < labels.length; s++) {
         var total = previous[s];
 
         if (s > 0) {
-          total = _logAdd(total, previous[s - 1]);
+          total = LogMath.logAdd(total, previous[s - 1]);
         }
 
         if (s > 1 && labels[s] != blankId && labels[s] != labels[s - 2]) {
-          total = _logAdd(total, previous[s - 2]);
+          total = LogMath.logAdd(total, previous[s - 2]);
         }
 
         current[s] = total + _ctcLogProbs.at(t, labels[s]);
@@ -266,17 +264,10 @@ class JointCtcTransformerBeamSearch {
       previous = current;
     }
 
-    return _logAdd(previous[labels.length - 1], previous[labels.length - 2]);
-  }
-
-  static double _logAdd(double a, double b) {
-    if (a == _logZero) return b;
-    if (b == _logZero) return a;
-
-    final larger = max(a, b);
-    final smaller = min(a, b);
-
-    return larger + log(1.0 + exp(smaller - larger));
+    return LogMath.logAdd(
+      previous[labels.length - 1],
+      previous[labels.length - 2],
+    );
   }
 }
 
@@ -284,44 +275,17 @@ class _CtcLogProbs {
   final List<double> logits;
   final int time;
   final int vocab;
-  final int Function(int timeIndex, int vocabIndex) index;
-  late final List<double> _logProbs = _buildLogProbs();
+  late final Float64List _logProbs;
 
   _CtcLogProbs(this.logits, List<int> shape)
       : time = _timeFromShape(shape),
-        vocab = _vocabFromShape(shape),
-        index = _indexFromShape(shape);
-
-  double at(int timeIndex, int vocabIndex) {
-    return _logProbs[index(timeIndex, vocabIndex)];
+        vocab = _vocabFromShape(shape) {
+    final layout = CtcLogitsLayout(time: time, vocab: vocab);
+    _logProbs = LogMath.logSoftmaxAllFrames(logits, layout);
   }
 
-  List<double> _buildLogProbs() {
-    final values = List<double>.from(logits);
-
-    for (int t = 0; t < time; t++) {
-      var maxValue = double.negativeInfinity;
-
-      for (int v = 0; v < vocab; v++) {
-        final value = values[index(t, v)];
-        if (value > maxValue) maxValue = value;
-      }
-
-      var sumExp = 0.0;
-
-      for (int v = 0; v < vocab; v++) {
-        sumExp += exp(values[index(t, v)] - maxValue);
-      }
-
-      final logSumExp = maxValue + log(sumExp);
-
-      for (int v = 0; v < vocab; v++) {
-        final offset = index(t, v);
-        values[offset] -= logSumExp;
-      }
-    }
-
-    return values;
+  double at(int timeIndex, int vocabIndex) {
+    return _logProbs[timeIndex * vocab + vocabIndex];
   }
 
   static int _timeFromShape(List<int> shape) {
@@ -336,26 +300,6 @@ class _CtcLogProbs {
     if (shape.length == 3) return shape[2];
     throw ArgumentError('Unsupported CTC logits shape: $shape');
   }
-
-  static int Function(int timeIndex, int vocabIndex) _indexFromShape(
-    List<int> shape,
-  ) {
-    final vocab = _vocabFromShape(shape);
-
-    if (shape.length == 2) {
-      return (t, v) => t * vocab + v;
-    }
-
-    if (shape.length == 3 && shape[0] == 1) {
-      return (t, v) => t * vocab + v;
-    }
-
-    if (shape.length == 3 && shape[1] == 1) {
-      return (t, v) => t * vocab + v;
-    }
-
-    throw ArgumentError('Unsupported CTC logits shape: $shape');
-  }
 }
 
 class _JointHypothesis {
@@ -363,6 +307,7 @@ class _JointHypothesis {
   final List<int> tokens;
   final double decoderScore;
   final double ctcScore;
+  final List<Object> caches;
   final bool ended;
 
   const _JointHypothesis({
@@ -370,20 +315,7 @@ class _JointHypothesis {
     required this.tokens,
     required this.decoderScore,
     required this.ctcScore,
+    required this.caches,
     this.ended = false,
   });
-
-  _JointHypothesis copyWith({
-    required List<int> yseq,
-    required double decoderScore,
-    required bool ended,
-  }) {
-    return _JointHypothesis(
-      yseq: yseq,
-      tokens: tokens,
-      decoderScore: decoderScore,
-      ctcScore: ctcScore,
-      ended: ended,
-    );
-  }
 }
