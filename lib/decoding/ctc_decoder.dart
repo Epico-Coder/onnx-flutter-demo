@@ -8,26 +8,25 @@ class CtcDecoder {
     required int eosId,
   }) {
     final layout = CtcLogitsLayout.fromShape(shape);
+    final time = layout.time;
+    final vocab = layout.vocab;
     final ids = <int>[];
-    int? previous;
+    int previous = -1;
 
-    for (int t = 0; t < layout.time; t++) {
+    for (int t = 0; t < time; t++) {
+      final base = t * vocab;
       int bestId = 0;
       double bestValue = double.negativeInfinity;
 
-      for (int v = 0; v < layout.vocab; v++) {
-        final value = logits[layout.index(t, v)];
+      for (int v = 0; v < vocab; v++) {
+        final value = logits[base + v];
         if (value > bestValue) {
           bestValue = value;
           bestId = v;
         }
       }
 
-      final isBlank = bestId == blankId;
-      final isRepeat = bestId == previous;
-      final isEos = bestId == eosId;
-
-      if (!isBlank && !isRepeat && !isEos) {
+      if (bestId != blankId && bestId != previous && bestId != eosId) {
         ids.add(bestId);
       }
       previous = bestId;
@@ -37,20 +36,18 @@ class CtcDecoder {
   }
 
   static String tokensToText(List<int> ids, List<String> tokens) {
-    final pieces = <String>[];
+    final buf = StringBuffer();
 
     for (final id in ids) {
       if (id < 0 || id >= tokens.length) continue;
       final token = tokens[id];
-      if (token.startsWith('<') && token.endsWith('>')) {
-        continue;
-      }
-      pieces.add(token);
+      if (token.startsWith('<') && token.endsWith('>')) continue;
+      buf.write(token);
     }
 
-    return pieces
-        .join('')
-        .replaceAll('\u2581', ' ')
+    return buf
+        .toString()
+        .replaceAll('▁', ' ')
         .replaceAll(RegExp(r'\s+'), ' ')
         .trim();
   }
