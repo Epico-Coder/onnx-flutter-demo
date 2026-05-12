@@ -22,6 +22,7 @@ class JointCtcTransformerBeamSearch {
 
   late final _CtcLogProbs _ctcLogProbs = _CtcLogProbs(ctcLogits, ctcShape);
   final Map<String, double> _ctcPrefixScoreCache = {};
+  List<OrtValue>? _zeroCaches;
 
   JointCtcTransformerBeamSearch({
     required this.decoderSession,
@@ -40,13 +41,14 @@ class JointCtcTransformerBeamSearch {
   });
 
   Future<List<int>> decode() async {
+    await _ensureZeroCaches();
+
     var active = <_JointHypothesis>[
       _JointHypothesis(
         yseq: [sosId],
         tokens: const [],
         decoderScore: 0.0,
         ctcScore: _ctcPrefixScore(const []),
-        caches: await _initialCaches(),
       ),
     ];
     final ended = <_JointHypothesis>[];
@@ -56,8 +58,7 @@ class JointCtcTransformerBeamSearch {
       final candidates = <_JointHypothesis>[];
 
       for (final hyp in active) {
-        final decoderStep = await _runDecoderStep(hyp);
-        final logProbs = decoderStep.logProbs;
+        final logProbs = await _runDecoderStep(hyp.yseq.last);
         final topIds = _topTokenIds(logProbs, tokenPruneSize, includeId: eosId);
 
         for (final tokenId in topIds) {
@@ -70,7 +71,6 @@ class JointCtcTransformerBeamSearch {
               hyp.copyWith(
                 yseq: nextYseq,
                 decoderScore: hyp.decoderScore + logProbs[tokenId],
-                caches: decoderStep.caches,
                 ended: true,
               ),
             );
@@ -84,7 +84,6 @@ class JointCtcTransformerBeamSearch {
               tokens: nextTokens,
               decoderScore: hyp.decoderScore + logProbs[tokenId],
               ctcScore: _ctcPrefixScore(nextTokens),
-              caches: decoderStep.caches,
             ),
           );
         }
@@ -118,46 +117,41 @@ class JointCtcTransformerBeamSearch {
     return decoderWeight * hyp.decoderScore + ctcWeight * hyp.ctcScore;
   }
 
-  Future<List<dynamic>> _initialCaches() async {
-    final caches = <dynamic>[];
+  Future<void> _ensureZeroCaches() async {
+    if (_zeroCaches != null) return;
+
+    final caches = <OrtValue>[];
+    final zeros = Float32List(decoderOutputSize);
 
     for (int i = 0; i < decoderLayers; i++) {
-      caches.add(await OrtValue.fromList(Float32List(0), [
-        1,
-        0,
-        decoderOutputSize,
-      ]));
+      caches.add(
+        await OrtValue.fromList(zeros, [1, 1, decoderOutputSize]),
+      );
     }
 
-    return caches;
+    _zeroCaches = caches;
   }
 
-  Future<_DecoderStep> _runDecoderStep(_JointHypothesis hyp) async {
+  Future<List<double>> _runDecoderStep(int lastToken) async {
     final inputs = <String, OrtValue>{};
     final inputNames = decoderSession.inputNames.cast<String>();
 
     inputs[inputNames[0]] = await OrtValue.fromList(
-      Int64List.fromList([hyp.yseq.last]),
+      Int64List.fromList([lastToken]),
       [1, 1],
     );
     inputs[inputNames[1]] = encoderOut;
 
     for (int i = 0; i < decoderLayers; i++) {
-      inputs[inputNames[i + 2]] = hyp.caches[i];
+      inputs[inputNames[i + 2]] = _zeroCaches![i];
     }
 
     final outputs = await decoderSession.run(inputs);
     final outputNames = decoderSession.outputNames.cast<String>();
     final logSoftmax = outputs[outputNames[0]];
     final rawLogProbs = (await logSoftmax.asFlattenedList()).cast<double>();
-    final logProbs = _normalizeLogProbs(rawLogProbs);
-    final caches = <dynamic>[];
 
-    for (int i = 0; i < decoderLayers; i++) {
-      caches.add(outputs[outputNames[i + 1]]);
-    }
-
-    return _DecoderStep(logProbs, caches);
+    return _normalizeLogProbs(rawLogProbs);
   }
 
   List<double> _normalizeLogProbs(List<double> values) {
@@ -364,19 +358,11 @@ class _CtcLogProbs {
   }
 }
 
-class _DecoderStep {
-  final List<double> logProbs;
-  final List<dynamic> caches;
-
-  const _DecoderStep(this.logProbs, this.caches);
-}
-
 class _JointHypothesis {
   final List<int> yseq;
   final List<int> tokens;
   final double decoderScore;
   final double ctcScore;
-  final List<dynamic> caches;
   final bool ended;
 
   const _JointHypothesis({
@@ -384,14 +370,12 @@ class _JointHypothesis {
     required this.tokens,
     required this.decoderScore,
     required this.ctcScore,
-    required this.caches,
     this.ended = false,
   });
 
   _JointHypothesis copyWith({
     required List<int> yseq,
     required double decoderScore,
-    required List<dynamic> caches,
     required bool ended,
   }) {
     return _JointHypothesis(
@@ -399,7 +383,6 @@ class _JointHypothesis {
       tokens: tokens,
       decoderScore: decoderScore,
       ctcScore: ctcScore,
-      caches: caches,
       ended: ended,
     );
   }
