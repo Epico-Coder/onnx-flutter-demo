@@ -5,10 +5,10 @@ beam_search:
   pre_beam_ratio: 1.5
   pre_beam_score_key: full
 ctc:
-  model_path: C:\Users\user\.cache\espnet_onnx\DutchCGNConformerFBankExport\full\ctc.onnx
+  model_path: /Users/jimi/.cache/espnet_onnx/YuanyuanZhang/DutchCGNConformerFBank/full/ctc.onnx
 decoder:
   dec_type: XformerDecoder
-  model_path: C:\Users\user\.cache\espnet_onnx\DutchCGNConformerFBankExport\full\xformer_decoder.onnx
+  model_path: /Users/jimi/.cache/espnet_onnx/YuanyuanZhang/DutchCGNConformerFBank/full/xformer_decoder.onnx
   n_layers: 6
   odim: 256
 encoder:
@@ -34,7 +34,7 @@ encoder:
       win_length: 400
       window: hann
   is_vggrnn: false
-  model_path: C:\Users\user\.cache\espnet_onnx\DutchCGNConformerFBankExport\full\default_encoder.onnx
+  model_path: /Users/jimi/.cache/espnet_onnx/YuanyuanZhang/DutchCGNConformerFBank/full/default_encoder.onnx
   normalize:
     eps: 1.0e-20
     norm_means: true
@@ -5050,13 +5050,13 @@ token:
   - <sos/eos>
   sos: 4999
 tokenizer:
-  bpemodel: C:\Users\user\.cache\espnet_onnx\DutchCGNConformerFBankExport\bpe.model
+  bpemodel: /Users/jimi/.cache/espnet_onnx/YuanyuanZhang/DutchCGNConformerFBank/bpe.model
   token_type: bpe
 transducer:
   use_transducer_decoder: false
 weights:
-  ctc: 0.3
-  decoder: 0.7
+  ctc: 0.5
+  decoder: 0.5
   length_bonus: 0.0
-  lm: 0.0
+  lm: 1.0
   ngram: 0.9

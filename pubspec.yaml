@@ -31,8 +31,5 @@ flutter:
     - assets/models/espnet_onnx/bpe.model
     - assets/models/espnet_onnx/config.yaml
     - assets/models/espnet_onnx/default_encoder.onnx
-    - assets/models/espnet_onnx/default_encoder.onnx.data
     - assets/models/espnet_onnx/xformer_decoder.onnx
-    - assets/models/espnet_onnx/xformer_decoder.onnx.data
     - assets/models/espnet_onnx/ctc.onnx
-    - assets/models/espnet_onnx/ctc.onnx.data
