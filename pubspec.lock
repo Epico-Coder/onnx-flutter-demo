@@ -121,10 +121,9 @@ packages:
   flutter_onnxruntime:
     dependency: "direct main"
     description:
-      name: flutter_onnxruntime
-      sha256: "72fad60739e01f2278c266f4ec386b392c5ecdfc33d44b4a155c609366f6ece5"
-      url: "https://pub.dev"
-    source: hosted
+      path: "packages/flutter_onnxruntime"
+      relative: true
+    source: path
     version: "1.7.0"
   flutter_test:
     dependency: "direct dev"
