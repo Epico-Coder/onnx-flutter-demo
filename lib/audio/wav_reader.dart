@@ -24,10 +24,14 @@ class WavReader {
       final chunkSize = data.getUint32(offset + 4, Endian.little);
 
       if (chunkId == 'fmt ') {
-        audioFormat = data.getUint16(offset + 8, Endian.little);
-        channels = data.getUint16(offset + 10, Endian.little);
-        sampleRate = data.getUint32(offset + 12, Endian.little);
+        audioFormat   = data.getUint16(offset + 8,  Endian.little);
+        channels      = data.getUint16(offset + 10, Endian.little);
+        sampleRate    = data.getUint32(offset + 12, Endian.little);
         bitsPerSample = data.getUint16(offset + 22, Endian.little);
+
+        if (audioFormat == 0xFFFE && chunkSize >= 40) {
+          audioFormat = data.getUint16(offset + 32, Endian.little);
+        }
       }
 
       if (chunkId == 'data') {
