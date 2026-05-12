@@ -187,7 +187,16 @@ lib/decoding/ctc_logits.dart               ← shared log-softmax / top-K
 lib/decoding/joint_ctc_transformer_beam_search.dart
 lib/decoding/transformer_decoder_runner.dart
 lib/debug/intermediate_feature_writer.dart
+packages/flutter_onnxruntime/              ← vendored fork
 assets/models/espnet_onnx/
 assets/test.wav                            ← reference audio
 test/
 ```
+
+> `flutter_onnxruntime` is vendored because pub.dev 1.7.0's macOS
+> `register(with:)` calls `[FlutterBinaryMessenger makeBackgroundTaskQueue]`,
+> a selector that doesn't exist on older FlutterMacOS engines (≤ 3.41 at the
+> time of writing). The vendored copy keeps the older `register` impl that
+> doesn't depend on that selector. Don't drop the override until your Flutter
+> macOS engine exposes `makeBackgroundTaskQueue`, or the app will crash at
+> launch with `unrecognized selector sent to instance`.
