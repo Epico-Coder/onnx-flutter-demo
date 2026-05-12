@@ -12,6 +12,7 @@ import '../debug/intermediate_feature_writer.dart';
 import '../decoding/ctc_decoder.dart';
 import '../decoding/ctc_prefix_beam_search.dart';
 import '../decoding/joint_ctc_transformer_beam_search.dart';
+import '../decoding/transformer_decoder_runner.dart';
 
 enum DecodingMode {
   greedyCtc,
@@ -53,7 +54,9 @@ class EspnetAsrService {
     );
 
     _ctcSession = await _ort.createSession('$modelDir/ctc.onnx');
-    _decoderSession = await _ort.createSession('$modelDir/xformer_decoder.onnx');
+    _decoderSession = await _ort.createSession(
+      '$modelDir/xformer_decoder.onnx',
+    );
 
     _tokens = await _loadTokensFromFile('$modelDir/config.yaml');
 
@@ -174,9 +177,13 @@ class EspnetAsrService {
           beamSize: 20,
         );
       case DecodingMode.jointCtcTransformerBeam:
-        return JointCtcTransformerBeamSearch(
+        final runner = OrtTransformerDecoderRunner(
           decoderSession: _decoderSession,
           encoderOut: encoderOut,
+          vocab: ctcShape.last,
+        );
+        return JointCtcTransformerBeamSearch(
+          decoder: runner,
           ctcLogits: ctcLogits,
           ctcShape: ctcShape,
           blankId: 0,
@@ -211,22 +218,38 @@ class EspnetAsrService {
       '$_modelAssetDir/config.yaml',
       '$_modelAssetDir/bpe.model',
       '$_modelAssetDir/default_encoder.onnx',
-      '$_modelAssetDir/default_encoder.onnx.data',
       '$_modelAssetDir/ctc.onnx',
-      '$_modelAssetDir/ctc.onnx.data',
       '$_modelAssetDir/xformer_decoder.onnx',
-      '$_modelAssetDir/xformer_decoder.onnx.data',
     ];
+
+    final expectedFilenames =
+        assetPaths.map((p) => p.split('/').last).toSet();
+
+    // Drop any leftover files from previous exports — e.g. *.onnx.data
+    // sidecars that no longer ship with the current model, or stale .onnx
+    // files of a different size. ONNX runtime silently loads external data
+    // by filename, so a stale sidecar will quietly swap in the old weights.
+    for (final entity in modelDir.listSync()) {
+      if (entity is File) {
+        final name = entity.uri.pathSegments.last;
+        if (!expectedFilenames.contains(name)) {
+          await entity.delete();
+        }
+      }
+    }
 
     for (final assetPath in assetPaths) {
       final filename = assetPath.split('/').last;
       final outputFile = File('${modelDir.path}/$filename');
 
-      if (!await outputFile.exists()) {
-        final data = await rootBundle.load(assetPath);
+      final bundled = await rootBundle.load(assetPath);
+      final bundledSize = bundled.lengthInBytes;
+      final shouldOverwrite = !await outputFile.exists() ||
+          await outputFile.length() != bundledSize;
 
+      if (shouldOverwrite) {
         await outputFile.writeAsBytes(
-          data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes),
+          bundled.buffer.asUint8List(bundled.offsetInBytes, bundledSize),
           flush: true,
         );
       }
