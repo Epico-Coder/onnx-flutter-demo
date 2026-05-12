@@ -1,5 +1,3 @@
-import 'dart:typed_data';
-
 import 'ctc_logits.dart';
 
 class CtcPrefixBeamSearch {
