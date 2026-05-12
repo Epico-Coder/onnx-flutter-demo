@@ -187,7 +187,6 @@ lib/decoding/ctc_logits.dart               ← shared log-softmax / top-K
 lib/decoding/joint_ctc_transformer_beam_search.dart
 lib/decoding/transformer_decoder_runner.dart
 lib/debug/intermediate_feature_writer.dart
-packages/flutter_onnxruntime/              ← vendored fork
 assets/models/espnet_onnx/
 assets/test.wav                            ← reference audio
 test/
