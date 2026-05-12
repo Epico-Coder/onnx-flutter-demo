@@ -135,6 +135,27 @@ public class FlutterOnnxruntimePlugin: NSObject, FlutterPlugin {
           }
         }
 
+        if let level = options["graphOptimizationLevel"] as? String {
+          let mapped: ORTGraphOptimizationLevel
+          switch level {
+          case "none":     mapped = .none
+          case "basic":    mapped = .basic
+          case "extended": mapped = .extended
+          case "all":      mapped = .all
+          default:
+            result(FlutterError(code: "INVALID_GRAPH_OPT_LEVEL",
+              message: "Unknown graphOptimizationLevel: \(level)", details: nil))
+            return
+          }
+          do {
+            try sessionOptions.setGraphOptimizationLevel(mapped)
+          } catch {
+            result(FlutterError(code: "SESSION_OPTIONS_ERROR",
+              message: "Failed to set graphOptimizationLevel: \(error.localizedDescription)", details: nil))
+            return
+          }
+        }
+
         // Note: 14/04/25 interOpNumThreads is not supported in onnxruntime-objc
         // if let interOpNumThreads = options["interOpNumThreads"] as? Int {
         //   try sessionOptions.setInterOpNumThreads(Int32(interOpNumThreads))
