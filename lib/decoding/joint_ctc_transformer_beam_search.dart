@@ -17,7 +17,7 @@ class JointCtcTransformerBeamSearch {
   final double decoderWeight;
 
   late final _CtcLogProbs _ctcLogProbs = _CtcLogProbs(ctcLogits, ctcShape);
-  final Map<String, double> _ctcPrefixScoreCache = {};
+  late final _CtcDpState _seedCtcState = _seedState();
 
   JointCtcTransformerBeamSearch({
     required this.decoder,
@@ -39,9 +39,8 @@ class JointCtcTransformerBeamSearch {
       _JointHypothesis(
         yseq: [sosId],
         tokens: const [],
-        tokensKey: '',
         decoderScore: 0.0,
-        ctcScore: _ctcPrefixScore(const [], ''),
+        ctcState: _seedCtcState,
         caches: initialCaches,
       ),
     ];
@@ -68,9 +67,8 @@ class JointCtcTransformerBeamSearch {
             _JointHypothesis(
               yseq: [...hyp.yseq, eosId],
               tokens: hyp.tokens,
-              tokensKey: hyp.tokensKey,
               decoderScore: hyp.decoderScore + logProbs[eosId],
-              ctcScore: hyp.ctcScore,
+              ctcState: hyp.ctcState,
               caches: nextCaches,
               ended: true,
             ),
@@ -98,9 +96,8 @@ class JointCtcTransformerBeamSearch {
               _JointHypothesis(
                 yseq: nextYseq,
                 tokens: hyp.tokens,
-                tokensKey: hyp.tokensKey,
                 decoderScore: hyp.decoderScore + logProbs[tokenId],
-                ctcScore: hyp.ctcScore,
+                ctcState: hyp.ctcState,
                 caches: nextCaches,
                 ended: true,
               ),
@@ -109,15 +106,13 @@ class JointCtcTransformerBeamSearch {
           }
 
           final nextTokens = [...hyp.tokens, tokenId];
-          final nextKey =
-              hyp.tokensKey.isEmpty ? '$tokenId' : '${hyp.tokensKey},$tokenId';
+          final nextCtc = _extendCtcState(hyp.ctcState, tokenId);
           candidates.add(
             _JointHypothesis(
               yseq: nextYseq,
               tokens: nextTokens,
-              tokensKey: nextKey,
               decoderScore: hyp.decoderScore + logProbs[tokenId],
-              ctcScore: _ctcPrefixScore(nextTokens, nextKey),
+              ctcState: nextCtc,
               caches: nextCaches,
             ),
           );
@@ -151,11 +146,11 @@ class JointCtcTransformerBeamSearch {
   }
 
   double _score(_JointHypothesis hyp) {
-    if (hyp.ctcScore == LogMath.logZero) {
+    final ctc = hyp.ctcState.score;
+    if (ctc == LogMath.logZero) {
       return decoderWeight * hyp.decoderScore;
     }
-
-    return decoderWeight * hyp.decoderScore + ctcWeight * hyp.ctcScore;
+    return decoderWeight * hyp.decoderScore + ctcWeight * ctc;
   }
 
   /// Espnet-equivalent `end_detect`: return true when ended-hyp scores have
@@ -190,66 +185,64 @@ class JointCtcTransformerBeamSearch {
     return count == m;
   }
 
-  double _ctcPrefixScore(List<int> prefix, String key) {
-    final cached = _ctcPrefixScoreCache[key];
-    if (cached != null) return cached;
-
-    final score = _computeCtcPrefixScore(prefix);
-    _ctcPrefixScoreCache[key] = score;
-    return score;
+  /// Forward CTC state for the empty prefix (just `<sos>`).
+  /// `lastB[t] = sum_{0..t} log p(blank at t')` and `lastTn[t] = -inf` because
+  /// no non-blank token has been emitted.
+  _CtcDpState _seedState() {
+    final t = _ctcLogProbs.time;
+    final lastB = Float64List(t);
+    final lastTn = Float64List(t)..fillRange(0, t, LogMath.logZero);
+    lastB[0] = _ctcLogProbs.at(0, blankId);
+    for (int i = 1; i < t; i++) {
+      lastB[i] = lastB[i - 1] + _ctcLogProbs.at(i, blankId);
+    }
+    return _CtcDpState(
+      lastB: lastB,
+      lastTn: lastTn,
+      lastToken: -1,
+      prefixLength: 0,
+    );
   }
 
-  double _computeCtcPrefixScore(List<int> prefix) {
-    if (prefix.isEmpty) {
-      var score = 0.0;
+  /// Espnet-style incremental CTC prefix score: extend `old` by one new
+  /// non-blank token `c`. Only the last two columns of the forward trellis
+  /// need to be recomputed — O(T) per extension instead of O(L·T).
+  _CtcDpState _extendCtcState(_CtcDpState old, int c) {
+    final t = _ctcLogProbs.time;
+    final newLastTn = Float64List(t);
+    final newLastB = Float64List(t)..fillRange(0, t, LogMath.logZero);
 
-      for (int t = 0; t < _ctcLogProbs.time; t++) {
-        score += _ctcLogProbs.at(t, blankId);
+    // t = 0: only the very first decoded position can be c, which only
+    // happens when the parent prefix was empty (`<sos>` only).
+    if (old.prefixLength == 0) {
+      newLastTn[0] = _ctcLogProbs.at(0, c);
+    } else {
+      newLastTn[0] = LogMath.logZero;
+    }
+
+    final canSkipFromTn = c != old.lastToken;
+
+    for (int i = 1; i < t; i++) {
+      // New position L (= c): stay, or come from old's last-B (left
+      // neighbour). If c differs from the parent's last token, we can also
+      // skip directly from old's last-Tn (= the parent's last non-blank).
+      var sum = LogMath.logAdd(newLastTn[i - 1], old.lastB[i - 1]);
+      if (canSkipFromTn) {
+        sum = LogMath.logAdd(sum, old.lastTn[i - 1]);
       }
+      newLastTn[i] = sum + _ctcLogProbs.at(i, c);
 
-      return score;
+      // New position L+1 (= trailing blank): stay or come from c.
+      newLastB[i] =
+          LogMath.logAdd(newLastB[i - 1], newLastTn[i - 1]) +
+              _ctcLogProbs.at(i, blankId);
     }
 
-    final labels = <int>[];
-
-    for (final id in prefix) {
-      labels
-        ..add(blankId)
-        ..add(id);
-    }
-
-    labels.add(blankId);
-
-    var previous = List<double>.filled(labels.length, LogMath.logZero);
-    previous[0] = _ctcLogProbs.at(0, blankId);
-
-    if (labels.length > 1) {
-      previous[1] = _ctcLogProbs.at(0, labels[1]);
-    }
-
-    for (int t = 1; t < _ctcLogProbs.time; t++) {
-      final current = List<double>.filled(labels.length, LogMath.logZero);
-
-      for (int s = 0; s < labels.length; s++) {
-        var total = previous[s];
-
-        if (s > 0) {
-          total = LogMath.logAdd(total, previous[s - 1]);
-        }
-
-        if (s > 1 && labels[s] != blankId && labels[s] != labels[s - 2]) {
-          total = LogMath.logAdd(total, previous[s - 2]);
-        }
-
-        current[s] = total + _ctcLogProbs.at(t, labels[s]);
-      }
-
-      previous = current;
-    }
-
-    return LogMath.logAdd(
-      previous[labels.length - 1],
-      previous[labels.length - 2],
+    return _CtcDpState(
+      lastB: newLastB,
+      lastTn: newLastTn,
+      lastToken: c,
+      prefixLength: old.prefixLength + 1,
     );
   }
 }
@@ -285,21 +278,38 @@ class _CtcLogProbs {
   }
 }
 
+class _CtcDpState {
+  final Float64List lastB;
+  final Float64List lastTn;
+  final int lastToken;
+  final int prefixLength;
+
+  const _CtcDpState({
+    required this.lastB,
+    required this.lastTn,
+    required this.lastToken,
+    required this.prefixLength,
+  });
+
+  double get score {
+    final last = lastB.length - 1;
+    return LogMath.logAdd(lastTn[last], lastB[last]);
+  }
+}
+
 class _JointHypothesis {
   final List<int> yseq;
   final List<int> tokens;
-  final String tokensKey;
   final double decoderScore;
-  final double ctcScore;
+  final _CtcDpState ctcState;
   final List<Object> caches;
   final bool ended;
 
   const _JointHypothesis({
     required this.yseq,
     required this.tokens,
-    required this.tokensKey,
     required this.decoderScore,
-    required this.ctcScore,
+    required this.ctcState,
     required this.caches,
     this.ended = false,
   });
