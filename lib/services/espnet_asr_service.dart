@@ -54,8 +54,18 @@ class EspnetAsrService {
     );
 
     _ctcSession = await _ort.createSession('$modelDir/ctc.onnx');
+
+    // CoreML is typically a 2-3x speedup for the transformer decoder on
+    // Apple Silicon. If a node falls back to CPU and slows things down,
+    // drop the providers list and rerun.
+    final decoderProviders = Platform.isMacOS || Platform.isIOS
+        ? [OrtProvider.CORE_ML]
+        : <OrtProvider>[];
     _decoderSession = await _ort.createSession(
       '$modelDir/xformer_decoder.onnx',
+      options: decoderProviders.isEmpty
+          ? null
+          : OrtSessionOptions(providers: decoderProviders),
     );
 
     _tokens = await _loadTokensFromFile('$modelDir/config.yaml');
@@ -189,8 +199,8 @@ class EspnetAsrService {
           blankId: 0,
           sosId: 4999,
           eosId: 4999,
-          beamSize: 20,
-          tokenPruneSize: 40,
+          beamSize: 10,
+          tokenPruneSize: 25,
           ctcWeight: 0.3,
           decoderWeight: 0.7,
         ).decode();

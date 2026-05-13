@@ -39,8 +39,9 @@ class JointCtcTransformerBeamSearch {
       _JointHypothesis(
         yseq: [sosId],
         tokens: const [],
+        tokensKey: '',
         decoderScore: 0.0,
-        ctcScore: _ctcPrefixScore(const []),
+        ctcScore: _ctcPrefixScore(const [], ''),
         caches: initialCaches,
       ),
     ];
@@ -67,6 +68,7 @@ class JointCtcTransformerBeamSearch {
             _JointHypothesis(
               yseq: [...hyp.yseq, eosId],
               tokens: hyp.tokens,
+              tokensKey: hyp.tokensKey,
               decoderScore: hyp.decoderScore + logProbs[eosId],
               ctcScore: hyp.ctcScore,
               caches: nextCaches,
@@ -76,38 +78,56 @@ class JointCtcTransformerBeamSearch {
           continue;
         }
 
-        final topIds = _topTokenIds(logProbs, tokenPruneSize, includeId: eosId);
+        final topIds = LogMath.topTokenIdsAtFrame(
+          logProbs,
+          0,
+          logProbs.length,
+          tokenPruneSize,
+        );
+        bool sawEos = false;
 
-        for (final tokenId in topIds) {
-          if (tokenId == blankId) continue;
-          if (tokenId == sosId && sosId != eosId) continue;
+        void addCandidate(int tokenId) {
+          if (tokenId == blankId) return;
+          if (tokenId == sosId && sosId != eosId) return;
 
           final nextYseq = [...hyp.yseq, tokenId];
 
           if (tokenId == eosId) {
+            sawEos = true;
             candidates.add(
               _JointHypothesis(
                 yseq: nextYseq,
                 tokens: hyp.tokens,
+                tokensKey: hyp.tokensKey,
                 decoderScore: hyp.decoderScore + logProbs[tokenId],
                 ctcScore: hyp.ctcScore,
                 caches: nextCaches,
                 ended: true,
               ),
             );
-            continue;
+            return;
           }
 
           final nextTokens = [...hyp.tokens, tokenId];
+          final nextKey =
+              hyp.tokensKey.isEmpty ? '$tokenId' : '${hyp.tokensKey},$tokenId';
           candidates.add(
             _JointHypothesis(
               yseq: nextYseq,
               tokens: nextTokens,
+              tokensKey: nextKey,
               decoderScore: hyp.decoderScore + logProbs[tokenId],
-              ctcScore: _ctcPrefixScore(nextTokens),
+              ctcScore: _ctcPrefixScore(nextTokens, nextKey),
               caches: nextCaches,
             ),
           );
+        }
+
+        for (int i = 0; i < topIds.length; i++) {
+          addCandidate(topIds[i]);
+        }
+        if (!sawEos && eosId >= 0 && eosId < logProbs.length) {
+          addCandidate(eosId);
         }
       }
 
@@ -170,49 +190,12 @@ class JointCtcTransformerBeamSearch {
     return count == m;
   }
 
-  List<int> _topTokenIds(
-    Float64List logProbs,
-    int count, {
-    required int includeId,
-  }) {
-    final limit = min(count, logProbs.length);
-    final ids = <int>[];
-
-    for (int candidate = 0; candidate < logProbs.length; candidate++) {
-      var insertAt = ids.length;
-
-      while (insertAt > 0 &&
-          logProbs[candidate] > logProbs[ids[insertAt - 1]]) {
-        insertAt--;
-      }
-
-      if (insertAt < limit) {
-        ids.insert(insertAt, candidate);
-
-        if (ids.length > limit) {
-          ids.removeLast();
-        }
-      }
-    }
-
-    if (!ids.contains(includeId) &&
-        includeId >= 0 &&
-        includeId < logProbs.length) {
-      ids.add(includeId);
-    }
-
-    return ids;
-  }
-
-  double _ctcPrefixScore(List<int> prefix) {
-    final key = prefix.join(',');
+  double _ctcPrefixScore(List<int> prefix, String key) {
     final cached = _ctcPrefixScoreCache[key];
-
     if (cached != null) return cached;
 
     final score = _computeCtcPrefixScore(prefix);
     _ctcPrefixScoreCache[key] = score;
-
     return score;
   }
 
@@ -305,6 +288,7 @@ class _CtcLogProbs {
 class _JointHypothesis {
   final List<int> yseq;
   final List<int> tokens;
+  final String tokensKey;
   final double decoderScore;
   final double ctcScore;
   final List<Object> caches;
@@ -313,6 +297,7 @@ class _JointHypothesis {
   const _JointHypothesis({
     required this.yseq,
     required this.tokens,
+    required this.tokensKey,
     required this.decoderScore,
     required this.ctcScore,
     required this.caches,
