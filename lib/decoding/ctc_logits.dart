@@ -29,7 +29,6 @@ class CtcLogitsLayout {
 class LogMath {
   static const double logZero = double.negativeInfinity;
 
-  /// log(exp(a) + exp(b)) computed without overflow.
   static double logAdd(double a, double b) {
     if (a == logZero) return b;
     if (b == logZero) return a;
@@ -38,11 +37,8 @@ class LogMath {
     return b + log(1.0 + exp(a - b));
   }
 
-  /// Returns a flat `(time, vocab)` Float64List of log-softmax values.
-  ///
-  /// If the input already sums to 1 in log-space — as the ESPnet CTC ONNX head
-  /// does — this is mathematically idempotent, but we still normalize so the
-  /// decoder is robust to raw-logit CTC heads.
+  /// Re-normalizes even when the input is already log-softmax, so the decoder
+  /// is robust to CTC heads that emit raw logits.
   static Float64List logSoftmaxAllFrames(
     List<double> logits,
     CtcLogitsLayout layout,
@@ -76,10 +72,6 @@ class LogMath {
     return out;
   }
 
-  /// Returns the indices of the top `count` entries of `logProbs[base..base+vocab)`.
-  ///
-  /// Uses a size-k min-heap so the cost is O(vocab · log k) instead of the
-  /// O(vocab · k) insertion sort the original used.
   static Int32List topTokenIdsAtFrame(
     Float64List logProbs,
     int base,
@@ -99,7 +91,6 @@ class LogMath {
         heapVals[heapSize] = value;
         heapSize++;
 
-        // Sift up.
         int i = heapSize - 1;
         while (i > 0) {
           final parent = (i - 1) >> 1;
@@ -121,7 +112,6 @@ class LogMath {
       heapVals[0] = value;
       heapIds[0] = v;
 
-      // Sift down.
       int i = 0;
       while (true) {
         final left = 2 * i + 1;

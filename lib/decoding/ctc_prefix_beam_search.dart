@@ -37,8 +37,6 @@ class CtcPrefixBeamSearch {
 
       beam.forEach((prefix, state) {
         final prefixScore = state.score;
-
-        // Stay on this prefix by emitting a blank.
         _mergeBlank(next, prefix, prefixScore + blankLogProb);
 
         final lastTokenId = prefix.lastTokenId;
@@ -50,7 +48,6 @@ class CtcPrefixBeamSearch {
           final tokenLogProb = frames[base + tokenId];
 
           if (tokenId == lastTokenId) {
-            // Repeat: same prefix (collapsed) or extend (after blank).
             _mergeNonBlank(next, prefix, state.nonBlank + tokenLogProb);
             _mergeNonBlank(
               next,
@@ -138,7 +135,6 @@ class CtcPrefixBeamSearch {
   }
 }
 
-/// Immutable prefix built as a linked list with a precomputed hash.
 class _Prefix {
   static final _Prefix empty = _Prefix._(null, -1, 0, 0);
 
@@ -152,7 +148,6 @@ class _Prefix {
   int get lastTokenId => tokenId;
 
   _Prefix extend(int id) {
-    // Same mixing strategy as Object.hashAll, but incremental.
     final nextHash = (_hash * 31 + id) & 0x3FFFFFFF;
     return _Prefix._(this, id, depth + 1, nextHash);
   }

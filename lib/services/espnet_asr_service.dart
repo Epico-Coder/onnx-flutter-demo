@@ -54,8 +54,16 @@ class EspnetAsrService {
     );
 
     _ctcSession = await _ort.createSession('$modelDir/ctc.onnx');
+
+    // Drop CORE_ML if you see CoreMLExecutionProvider fallback ping-pong.
+    final decoderProviders = Platform.isMacOS || Platform.isIOS
+        ? [OrtProvider.CORE_ML]
+        : <OrtProvider>[];
     _decoderSession = await _ort.createSession(
       '$modelDir/xformer_decoder.onnx',
+      options: decoderProviders.isEmpty
+          ? null
+          : OrtSessionOptions(providers: decoderProviders),
     );
 
     _tokens = await _loadTokensFromFile('$modelDir/config.yaml');
@@ -189,8 +197,8 @@ class EspnetAsrService {
           blankId: 0,
           sosId: 4999,
           eosId: 4999,
-          beamSize: 20,
-          tokenPruneSize: 40,
+          beamSize: 10,
+          tokenPruneSize: 25,
           ctcWeight: 0.3,
           decoderWeight: 0.7,
         ).decode();
@@ -225,10 +233,9 @@ class EspnetAsrService {
     final expectedFilenames =
         assetPaths.map((p) => p.split('/').last).toSet();
 
-    // Drop any leftover files from previous exports — e.g. *.onnx.data
-    // sidecars that no longer ship with the current model, or stale .onnx
-    // files of a different size. ONNX runtime silently loads external data
-    // by filename, so a stale sidecar will quietly swap in the old weights.
+    // ONNX runtime silently loads `*.onnx.data` sidecars next to a `.onnx`,
+    // so a leftover sidecar from a previous export would quietly swap in
+    // the old weights.
     for (final entity in modelDir.listSync()) {
       if (entity is File) {
         final name = entity.uri.pathSegments.last;
@@ -276,7 +283,5 @@ class EspnetAsrService {
     debugPrint('Decoder outputs: ${_decoderSession.outputNames}');
   }
 
-  void dispose() {
-    // Add session release/dispose here if your ONNX package version exposes it.
-  }
+  void dispose() {}
 }
