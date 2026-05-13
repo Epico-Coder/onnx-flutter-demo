@@ -60,9 +60,8 @@ class JointCtcTransformerBeamSearch {
         final nextCaches = result.caches;
 
         if (isFinalStep) {
-          // Force-close every still-active hypothesis at maxlen so the search
-          // always has ended candidates to choose from, matching espnet's
-          // `post_process` final-step behaviour.
+          // Force every still-active hyp into `ended` so the beam always
+          // resolves to a complete sequence at maxlen.
           candidates.add(
             _JointHypothesis(
               yseq: [...hyp.yseq, eosId],
@@ -131,11 +130,6 @@ class JointCtcTransformerBeamSearch {
       active = candidates.where((hyp) => !hyp.ended).take(beamSize).toList();
 
       if (active.isEmpty) break;
-
-      // Espnet-style end detection: stop when the best ended hyp at the last
-      // three lengths is at least D_end (10 nats) worse than the global best
-      // ended hyp — i.e. ended-hyp quality has plateaued and longer searches
-      // won't improve the result.
       if (_endDetect(ended, step)) break;
     }
 
@@ -153,9 +147,8 @@ class JointCtcTransformerBeamSearch {
     return decoderWeight * hyp.decoderScore + ctcWeight * ctc;
   }
 
-  /// Espnet-equivalent `end_detect`: return true when ended-hyp scores have
-  /// stagnated across the last `M` step lengths, i.e. growing the beam any
-  /// further is very unlikely to find a better-scoring complete hypothesis.
+  /// Espnet `end_detect`: stop once ended-hyp scores plateau across the last
+  /// `m` lengths (each within `dEnd` of the global best).
   bool _endDetect(List<_JointHypothesis> endedHyps, int step,
       {int m = 3, double dEnd = -10.0}) {
     if (endedHyps.isEmpty) return false;
@@ -185,9 +178,6 @@ class JointCtcTransformerBeamSearch {
     return count == m;
   }
 
-  /// Forward CTC state for the empty prefix (just `<sos>`).
-  /// `lastB[t] = sum_{0..t} log p(blank at t')` and `lastTn[t] = -inf` because
-  /// no non-blank token has been emitted.
   _CtcDpState _seedState() {
     final t = _ctcLogProbs.time;
     final lastB = Float64List(t);
@@ -204,16 +194,13 @@ class JointCtcTransformerBeamSearch {
     );
   }
 
-  /// Espnet-style incremental CTC prefix score: extend `old` by one new
-  /// non-blank token `c`. Only the last two columns of the forward trellis
-  /// need to be recomputed — O(T) per extension instead of O(L·T).
+  /// Incremental CTC forward step: O(T) per extension by computing only the
+  /// new trailing token + blank columns of the trellis from the parent state.
   _CtcDpState _extendCtcState(_CtcDpState old, int c) {
     final t = _ctcLogProbs.time;
     final newLastTn = Float64List(t);
     final newLastB = Float64List(t)..fillRange(0, t, LogMath.logZero);
 
-    // t = 0: only the very first decoded position can be c, which only
-    // happens when the parent prefix was empty (`<sos>` only).
     if (old.prefixLength == 0) {
       newLastTn[0] = _ctcLogProbs.at(0, c);
     } else {
@@ -223,16 +210,12 @@ class JointCtcTransformerBeamSearch {
     final canSkipFromTn = c != old.lastToken;
 
     for (int i = 1; i < t; i++) {
-      // New position L (= c): stay, or come from old's last-B (left
-      // neighbour). If c differs from the parent's last token, we can also
-      // skip directly from old's last-Tn (= the parent's last non-blank).
       var sum = LogMath.logAdd(newLastTn[i - 1], old.lastB[i - 1]);
       if (canSkipFromTn) {
         sum = LogMath.logAdd(sum, old.lastTn[i - 1]);
       }
       newLastTn[i] = sum + _ctcLogProbs.at(i, c);
 
-      // New position L+1 (= trailing blank): stay or come from c.
       newLastB[i] =
           LogMath.logAdd(newLastB[i - 1], newLastTn[i - 1]) +
               _ctcLogProbs.at(i, blankId);

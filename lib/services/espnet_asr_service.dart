@@ -55,9 +55,7 @@ class EspnetAsrService {
 
     _ctcSession = await _ort.createSession('$modelDir/ctc.onnx');
 
-    // CoreML is typically a 2-3x speedup for the transformer decoder on
-    // Apple Silicon. If a node falls back to CPU and slows things down,
-    // drop the providers list and rerun.
+    // Drop CORE_ML if you see CoreMLExecutionProvider fallback ping-pong.
     final decoderProviders = Platform.isMacOS || Platform.isIOS
         ? [OrtProvider.CORE_ML]
         : <OrtProvider>[];
@@ -235,10 +233,9 @@ class EspnetAsrService {
     final expectedFilenames =
         assetPaths.map((p) => p.split('/').last).toSet();
 
-    // Drop any leftover files from previous exports — e.g. *.onnx.data
-    // sidecars that no longer ship with the current model, or stale .onnx
-    // files of a different size. ONNX runtime silently loads external data
-    // by filename, so a stale sidecar will quietly swap in the old weights.
+    // ONNX runtime silently loads `*.onnx.data` sidecars next to a `.onnx`,
+    // so a leftover sidecar from a previous export would quietly swap in
+    // the old weights.
     for (final entity in modelDir.listSync()) {
       if (entity is File) {
         final name = entity.uri.pathSegments.last;
@@ -286,7 +283,5 @@ class EspnetAsrService {
     debugPrint('Decoder outputs: ${_decoderSession.outputNames}');
   }
 
-  void dispose() {
-    // Add session release/dispose here if your ONNX package version exposes it.
-  }
+  void dispose() {}
 }
